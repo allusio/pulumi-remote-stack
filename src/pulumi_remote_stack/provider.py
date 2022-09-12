@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import os
-import threading
 from typing import TypedDict
 
 import pulumi
@@ -70,9 +69,6 @@ def generate_program(
     return _pulumi_program
 
 
-lock = threading.Lock()
-
-
 class RemoteStackProvider(ResourceProvider):
 
     def _setup_project_stack(self, inputs: _Inputs, old_inputs: _Inputs = None):
@@ -121,39 +117,39 @@ class RemoteStackProvider(ResourceProvider):
                 env_vars=env_vars,
             )
         }
-        with lock:  # TODO lock because of https://github.com/pulumi/pulumi/issues/6052
-            if only_create:
-                create_stack(**kwargs)
-                return
-            else:
-                stack = create_or_select_stack(**kwargs)
 
-            stack_config = (
-                {
-                    key: _PulumiConfigValue(
-                        value=config_value["value"],
-                        secret=False,
-                    )
-                    for key, config_value in config.items()
-                } | {
-                    key: _PulumiConfigValue(
-                        value=config_value["value"],
-                        secret=True,
-                    )
-                    for key, config_value in secrets.items()
-                }
-            )
+        if only_create:
+            create_stack(**kwargs)
+            return
+        else:
+            stack = create_or_select_stack(**kwargs)
 
-            if old_inputs:
-                old_config_keys = (
-                    old_inputs["config"].keys() | old_inputs["secrets"].keys()
+        stack_config = (
+            {
+                key: _PulumiConfigValue(
+                    value=config_value["value"],
+                    secret=False,
                 )
-                for key in old_config_keys:
-                    if key not in stack_config:
-                        stack.remove_config(key)
+                for key, config_value in config.items()
+            } | {
+                key: _PulumiConfigValue(
+                    value=config_value["value"],
+                    secret=True,
+                )
+                for key, config_value in secrets.items()
+            }
+        )
 
-            stack.set_all_config(stack_config)
-            stack.up()
+        if old_inputs:
+            old_config_keys = (
+                old_inputs["config"].keys() | old_inputs["secrets"].keys()
+            )
+            for key in old_config_keys:
+                if key not in stack_config:
+                    stack.remove_config(key)
+
+        stack.set_all_config(stack_config)
+        stack.up()
 
     def create(self, inputs: _Inputs):
         project_name = inputs['project_name']
