@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 import os
 from typing import TypedDict
 
@@ -69,7 +70,7 @@ def generate_program(
     return _pulumi_program
 
 
-def _patch_get_all_config(stack):
+def _patch_get_all_config(project_name, stack):
     """
     Workaround for https://github.com/pulumi/pulumi/issues/7282
     """
@@ -78,7 +79,11 @@ def _patch_get_all_config(stack):
     origin_get_all_config = LocalWorkspace.get_all_config
 
     def get_all_config(self, stack_name):
-        deployment = stack.export_stack().deployment
+        result = stack._run_pulumi_cmd_sync(
+            ["stack", "export", "--stack", stack_name]
+        )
+        deployment = json.loads(result.stdout)['deployment']
+
         config_file = f"{vars(self)['work_dir']}/Pulumi.{stack_name}.yaml"
 
         with open(config_file) as f:
@@ -90,8 +95,15 @@ def _patch_get_all_config(stack):
                 config["encryptionsalt"] = encryptionsalt
             # TODO add support for encryptedkey after secret provider is chosen
 
-            with open(config_file, "w") as f:
-                yaml.safe_dump(config, f)
+        outputs = deployment['resources'][0]['outputs']
+
+        for key, item in config['config'].items():
+            if type(item) is dict:
+                output_name = key.removeprefix(f'{project_name}:')
+                item['secure'] = outputs[output_name]['ciphertext']
+
+        with open(config_file, "w") as f:
+            yaml.safe_dump(config, f)
 
         return origin_get_all_config(self, stack_name)
 
@@ -152,7 +164,8 @@ class RemoteStackProvider(ResourceProvider):
             return
         else:
             stack = create_or_select_stack(**kwargs)
-            _patch_get_all_config(stack)
+            _patch_get_all_config(project_name, stack)
+            stack.refresh_config()
 
         stack_config = (
             {
