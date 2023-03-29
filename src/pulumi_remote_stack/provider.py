@@ -69,6 +69,35 @@ def generate_program(
     return _pulumi_program
 
 
+def _patch_get_all_config(stack):
+    """
+    Workaround for https://github.com/pulumi/pulumi/issues/7282
+    """
+    import yaml
+    from pulumi.automation._local_workspace import LocalWorkspace
+    origin_get_all_config = LocalWorkspace.get_all_config
+
+    def get_all_config(self, stack_name):
+        deployment = stack.export_stack().deployment
+        config_file = f"{vars(self)['work_dir']}/Pulumi.{stack_name}.yaml"
+
+        with open(config_file) as f:
+            config = yaml.safe_load(f)
+
+        if 'secrets_providers' in deployment:
+            config["secretsprovider"] = deployment['secrets_providers']['type']
+            if encryptionsalt := deployment['secrets_providers']['state'].get('salt'):
+                config["encryptionsalt"] = encryptionsalt
+            # TODO add support for encryptedkey after secret provider is chosen
+
+            with open(config_file, "w") as f:
+                yaml.safe_dump(config, f)
+
+        return origin_get_all_config(self, stack_name)
+
+    LocalWorkspace.get_all_config = get_all_config
+
+
 class RemoteStackProvider(ResourceProvider):
 
     def _setup_project_stack(self, inputs: _Inputs, old_inputs: _Inputs = None):
@@ -123,6 +152,7 @@ class RemoteStackProvider(ResourceProvider):
             return
         else:
             stack = create_or_select_stack(**kwargs)
+            _patch_get_all_config(stack)
 
         stack_config = (
             {
