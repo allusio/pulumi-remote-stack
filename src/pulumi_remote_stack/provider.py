@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 import os
-import threading
 from typing import TypedDict
 
 import pulumi
 from pulumi.automation import (
     ConfigValue as _PulumiConfigValue, LocalWorkspace, LocalWorkspaceOptions,
     ProjectBackend, ProjectSettings, PulumiFn, StackSettings, create_or_select_stack,
-    create_stack,
+    create_stack, CommandError,
 )
 from pulumi.dynamic import CreateResult, DiffResult, ResourceProvider, UpdateResult
 
@@ -70,7 +70,44 @@ def generate_program(
     return _pulumi_program
 
 
-lock = threading.Lock()
+def _patch_get_all_config(project_name, stack):
+    """
+    Workaround for https://github.com/pulumi/pulumi/issues/7282
+    """
+    import yaml
+    from pulumi.automation._local_workspace import LocalWorkspace
+    origin_get_all_config = LocalWorkspace.get_all_config
+
+    def get_all_config(self, stack_name):
+        result = stack._run_pulumi_cmd_sync(
+            ["stack", "export", "--stack", stack_name]
+        )
+        deployment = json.loads(result.stdout)['deployment']
+
+        config_file = f"{vars(self)['work_dir']}/Pulumi.{stack_name}.yaml"
+
+        with open(config_file) as f:
+            config = yaml.safe_load(f)
+
+        if 'secrets_providers' in deployment:
+            config["secretsprovider"] = deployment['secrets_providers']['type']
+            if encryptionsalt := deployment['secrets_providers']['state'].get('salt'):
+                config["encryptionsalt"] = encryptionsalt
+            # TODO add support for encryptedkey after secret provider is chosen
+
+        outputs = deployment['resources'][0]['outputs']
+
+        for key, item in config['config'].items():
+            if type(item) is dict:
+                output_name = key.removeprefix(f'{project_name}:')
+                item['secure'] = outputs[output_name]['ciphertext']
+
+        with open(config_file, "w") as f:
+            yaml.safe_dump(config, f)
+
+        return origin_get_all_config(self, stack_name)
+
+    LocalWorkspace.get_all_config = get_all_config
 
 
 class RemoteStackProvider(ResourceProvider):
@@ -121,39 +158,46 @@ class RemoteStackProvider(ResourceProvider):
                 env_vars=env_vars,
             )
         }
-        with lock:  # TODO lock because of https://github.com/pulumi/pulumi/issues/6052
-            if only_create:
-                create_stack(**kwargs)
-                return
-            else:
-                stack = create_or_select_stack(**kwargs)
 
-            stack_config = (
-                {
-                    key: _PulumiConfigValue(
-                        value=config_value["value"],
-                        secret=False,
-                    )
-                    for key, config_value in config.items()
-                } | {
-                    key: _PulumiConfigValue(
-                        value=config_value["value"],
-                        secret=True,
-                    )
-                    for key, config_value in secrets.items()
-                }
-            )
+        if only_create:
+            create_stack(**kwargs)
+            return
+        else:
+            stack = create_or_select_stack(**kwargs)
+            _patch_get_all_config(project_name, stack)
+            try:
+                stack.refresh_config()
+            except CommandError as command_error:
+                command_result = command_error.args[0]
+                if 'error: no previous deployment' not in command_result:
+                    raise command_error
 
-            if old_inputs:
-                old_config_keys = (
-                    old_inputs["config"].keys() | old_inputs["secrets"].keys()
+        stack_config = (
+            {
+                key: _PulumiConfigValue(
+                    value=config_value["value"],
+                    secret=False,
                 )
-                for key in old_config_keys:
-                    if key not in stack_config:
-                        stack.remove_config(key)
+                for key, config_value in config.items()
+            } | {
+                key: _PulumiConfigValue(
+                    value=config_value["value"],
+                    secret=True,
+                )
+                for key, config_value in secrets.items()
+            }
+        )
 
-            stack.set_all_config(stack_config)
-            stack.up()
+        if old_inputs:
+            old_config_keys = (
+                old_inputs["config"].keys() | old_inputs["secrets"].keys()
+            )
+            for key in old_config_keys:
+                if key not in stack_config:
+                    stack.remove_config(key)
+
+        stack.set_all_config(stack_config)
+        stack.up()
 
     def create(self, inputs: _Inputs):
         project_name = inputs['project_name']
