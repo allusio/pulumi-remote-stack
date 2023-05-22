@@ -9,7 +9,7 @@ import pulumi
 from pulumi.automation import (
     ConfigValue as _PulumiConfigValue, LocalWorkspace, LocalWorkspaceOptions,
     ProjectBackend, ProjectSettings, PulumiFn, StackSettings, create_or_select_stack,
-    create_stack,
+    create_stack, CommandError,
 )
 from pulumi.dynamic import CreateResult, DiffResult, ResourceProvider, UpdateResult
 
@@ -165,7 +165,12 @@ class RemoteStackProvider(ResourceProvider):
         else:
             stack = create_or_select_stack(**kwargs)
             _patch_get_all_config(project_name, stack)
-            stack.refresh_config()
+            try:
+                stack.refresh_config()
+            except CommandError as command_error:
+                command_result = command_error.args[0]
+                if 'error: no previous deployment' not in command_result:
+                    raise command_error
 
         stack_config = (
             {
