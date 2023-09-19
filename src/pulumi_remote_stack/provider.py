@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -100,7 +101,8 @@ def _patch_get_all_config(project_name, stack):
         for key, item in config['config'].items():
             if type(item) is dict:
                 output_name = key.removeprefix(f'{project_name}:')
-                item['secure'] = outputs[output_name]['ciphertext']
+                with contextlib.suppress(KeyError):
+                    item['secure'] = outputs[output_name]['ciphertext']
 
         with open(config_file, "w") as f:
             yaml.safe_dump(config, f)
